@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>戦闘機G-Forceコックピットシミュレーター</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #111;
+      color: #fff;
+      font-family: 'Courier New', Courier, monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    #simulation-container {
+      position: relative;
+      border: 4px solid #333;
+      box-shadow: 0 0 20px rgba(0,0,0,0.8);
+    }
+    canvas {
+      display: block;
+    }
+    #instructions {
+      margin-top: 15px;
+      text-align: center;
+      font-size: 14px;
+      line-height: 1.6;
+      color: #aaa;
+    }
+    .key {
+      background: #333;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #fff;
+      border: 1px solid #555;
+    }
+  </style>
+</head>
+<body>
+
+<div id="simulation-container">
+  <canvas id="cockpitCanvas" width="800" height="500"></canvas>
+</div>
+
+<div id="instructions">
+  <strong>【操作方法】</strong><br>
+  加速: <span class="key">▲ 加速 (Up)</span> / 減速: <span class="key">▼ 減速 (Down)</span> <br>
+  旋回半径を小さく(急旋回): <span class="key">◀ 左 (Left)</span> / 旋回半径を大きく(緩旋回): <span class="key">▶ 右 (Right)</span>
+</div>
+
+<script>
+// --- シミュレーション・物理ロジッククラス ---
+class FighterGSimulator {
+  constructor() {
+    this.G = 9.80665;
+    this.G_LIMIT_SUIT = 7.5; // 耐Gスーツ限界値
+    this.bloodReserve = 100; // 脳内血流リザーブ (%)
+    this.pilotState = 'NORMAL';
+  }
+
+  calculateGForce(speedKmh, radiusM) {
+    if (radiusM <= 10) return 1.0; // 極小半径でのバグ防止
+    const v = speedKmh / 3.6;
+    const centrifugalAcc = (v * v) / radiusM;
+    const totalAcc = Math.sqrt(this.G * this.G + centrifugalAcc * centrifugalAcc);
+    return totalAcc / this.G;
+  }
+
+  update(gForce, deltaTime) {
+    if (gForce > this.G_LIMIT_SUIT) {
+      // 限界を超えたGに応じてリザーブが減少
+      const depletionRate = (gForce - this.G_LIMIT_SUIT) * 20 * deltaTime;
+      this.bloodReserve = Math.max(0, this.bloodReserve - depletionRate);
+    } else {
+      // 限界以下なら毎秒15%ずつ回復
+      this.bloodReserve = Math.min(100, this.bloodReserve + 15 * deltaTime);
+    }
+
+    // 状態判定
+    if (this.bloodReserve <= 0) {
+      this.pilotState = 'G_LOC';
+    } else if (this.bloodReserve < 25) {
+      this.pilotState = 'BLACK_OUT';
+    } else if (this.bloodReserve < 70) {
+      this.pilotState = 'GRAY_OUT';
+    } else {
+      this.pilotState = 'NORMAL';
+    }
+  }
+}
+
+// --- メインアプリケーション処理 ---
+const canvas = document.getElementById('cockpitCanvas');
+const ctx = canvas.getContext('2d');
+const simulator = new FighterGSimulator();
+
+// 初期状態パラメーター
+let speed = 600;       // km/h (初期値)
+let radius = 2000;     // メートル (初期値、大きいほど直線に近い)
+let keysPressed = {};  // キー入力状態の保持
+
+// 入力イベントリスナー
+window.addEventListener('keydown', (e) => { keysPressed[e.key] = true; });
+window.addEventListener('keyup', (e) => { keysPressed[e.key] = false; });
+
+// 毎フレームの物理アップデート
+function handleInput() {
+  // 上下キー：速度変更 (300km/h 〜 1500km/h)
+  if (keysPressed['ArrowUp']) speed = Math.min(1500, speed + 5);
+  if (keysPressed['ArrowDown']) speed = Math.max(300, speed - 5);
+
+  // 左右キー：旋回半径変更 (200m 〜 4000m)
+  // 左キーで半径が小さくなる（＝より急旋回になりGが跳ね上がる）
+  if (keysPressed['ArrowLeft']) radius = Math.max(200, radius - 15);
+  if (keysPressed['ArrowRight']) radius = Math.min(4000, radius + 15);
+}
+
+let lastTime = performance.now();
+
+// ループ処理
+function loop(currentTime) {
+  const deltaTime = (currentTime - lastTime) / 1000; // 秒単位
+  lastTime = currentTime;
+
+  handleInput();
+
+  // G力とパイロット状態の更新
+  const currentG = simulator.calculateGForce(speed, radius);
+  simulator.update(currentG, deltaTime);
+
+  // 描画処理
+  draw(currentG);
+
+  requestAnimationFrame(loop);
+}
+
+// 描画メイン関数
+function draw(gForce) {
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // 1. 外部景色の描画（簡易的な地平線とスカイライン）
+  ctx.fillStyle = '#0a2342'; // 空の青
+  ctx.fillRect(0, 0, w, h);
+  
+  ctx.fillStyle = '#1c3111'; // 大地の緑
+  ctx.fillRect(0, h / 2 + 20, w, h / 2 - 20);
+
+  // 2. HUD（ヘッドアップディスプレイ）の描画
+  ctx.strokeStyle = '#00ff00';
+  ctx.fillStyle = '#00ff00';
+  ctx.lineWidth = 2;
+  ctx.font = '16px "Courier New"';
+
+  // 照準レティクル（中央）
+  ctx.beginPath();
+  ctx.arc(w / 2, h / 2, 40, 0, Math.PI * 2);
+  ctx.moveTo(w / 2 - 60, h / 2); ctx.lineTo(w / 2 - 40, h / 2);
+  ctx.moveTo(w / 2 + 40, h / 2); ctx.lineTo(w / 2 + 60, h / 2);
+  ctx.stroke();
+
+  // インジケーターテキスト表示
+  ctx.fillText(`SPEED: ${Math.round(speed)} km/h`, 50, 60);
+  ctx.fillText(`TURN RADIUS: ${Math.round(radius)} m`, 50, 90);
+  
+  // Gメーター（高G時は赤文字化）
+  if (gForce > 7.5) ctx.fillStyle = '#ff0000';
+  ctx.font = 'bold 24px "Courier New"';
+  ctx.fillText(`G-FORCE: ${gForce.toFixed(2)} G`, 50, 140);
+
+  // パイロットステータス HUD
+  ctx.font = '16px "Courier New"';
+  ctx.fillStyle = '#00ff00';
+  ctx.fillText(`BLOOD RESV: ${Math.round(simulator.bloodReserve)}%`, w - 220, 60);
+  
+  // ステータスに応じたラベル色
+  let statusColor = '#00ff00';
+  if (simulator.pilotState === 'GRAY_OUT') statusColor = '#ffff00';
+  if (simulator.pilotState === 'BLACK_OUT') statusColor = '#ff7700';
+  if (simulator.pilotState === 'G_LOC') statusColor = '#ff0000';
+  
+  ctx.fillStyle = statusColor;
+  ctx.fillText(`PILOT SYS : ${simulator.pilotState}`, w - 220, 90);
+
+
+  // 3. 🔴 特殊効果（視覚損失エフェクトの重ね合わせ）
+  if (simulator.pilotState === 'GRAY_OUT') {
+    // トンネル視界：中心から外側に向けて黒くなるグラデーション
+    // 血流リザーブの低下に合わせてトンネルを狭くする
+    const progress = (70 - simulator.bloodReserve) / (70 - 25); // 0.0 〜 1.0
+    const startRadius = (w / 2) * (1 - progress * 0.6); // リザーブが減るほど円が小さくなる
+    
+    const grad = ctx.createRadialGradient(w / 2, h / 2, startRadius, w / 2, h / 2, w / 1.5);
+    grad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    grad.addColorStop(0.5, `rgba(40, 40, 40, ${progress * 0.6})`); // グレーアウト特有の色褪せ
+    grad.addColorStop(1, `rgba(0, 0, 0, ${progress * 0.95})`);
+    
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+  } else if (simulator.pilotState === 'BLACK_OUT') {
+    // ブラックアウト：ほぼ画面全体が暗転するが、中心にわずかな光の残滓
+    const progress = (25 - simulator.bloodReserve) / 25; // 0.0 〜 1.0
+    const grad = ctx.createRadialGradient(w / 2, h / 2, 10, w / 2, h / 2, w / 3);
+    grad.addColorStop(0, `rgba(0, 0, 0, ${progress * 0.8})`);
+    grad.addColorStop(1, `rgba(0, 0, 0, ${0.85 + progress * 0.15})`);
+    
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+  } else if (simulator.pilotState === 'G_LOC') {
+    // G-LOC：完全なシャットダウン（漆黒の闇）
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, w, h);
+
+    // コックピット警告文字だけかすかに点滅表示
+    if (Math.floor(performance.now() / 300) % 2 === 0) {
+      ctx.fillStyle = '#ff0000';
+      ctx.font = 'bold 32px "Courier New"';
+      ctx.textAlign = 'center';
+      ctx.fillText('!!! WAKE UP !!!', w / 2, h / 2);
+      ctx.font = '16px "Courier New"';
+      ctx.fillText('PILOT UNCONSCIOUS (G-LOC)', w / 2, h / 2 + 40);
+      ctx.textAlign = 'left'; // 元に戻す
+    }
+  }
+}
+
+// ループ起動
+requestAnimationFrame(loop);
+</script>
+
+</body>
+</html>
